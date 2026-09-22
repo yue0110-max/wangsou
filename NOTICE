@@ -1,0 +1,8 @@
+网搜
+Copyright 2026 yue0110-max
+
+This product is based on Aeri (https://github.com/fastdemo/aeri),
+Copyright 2026 @fastdemo, licensed under the Apache License, Version 2.0.
+
+网搜 modifies Aeri's frontend structure, visual system, content model, and
+navigation to provide a Chinese directory of legal, free-first anime sources.
