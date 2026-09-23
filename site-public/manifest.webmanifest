@@ -1,0 +1,18 @@
+{
+  "name": "网搜｜动漫热门榜与标题搜索",
+  "short_name": "网搜",
+  "description": "实时展示热门动漫，并支持按作品名称搜索。",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#070a13",
+  "theme_color": "#070a13",
+  "icons": [
+    {
+      "src": "favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}
