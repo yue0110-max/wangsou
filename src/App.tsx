@@ -21,6 +21,23 @@ type Anime = {
   episodes: number | null
   seasonYear: number | null
   genres: string[]
+  streamingEpisodes: StreamingEpisode[] | null
+  externalLinks: AnimeExternalLink[] | null
+  siteUrl: string | null
+}
+
+type StreamingEpisode = {
+  title: string | null
+  thumbnail: string | null
+  url: string | null
+  site: string | null
+}
+
+type AnimeExternalLink = {
+  url: string | null
+  site: string | null
+  type: string | null
+  language: string | null
 }
 
 type AnimeResponse = {
@@ -34,6 +51,7 @@ type AnimeResponse = {
 }
 
 const ANILIST_ENDPOINT = 'https://graphql.anilist.co'
+const YINGHUA_SEARCH_URL = 'https://yinghuadongman.org.cn/u/'
 const ANIME_QUERY = `
   query ExploreAnime($search: String, $sort: [MediaSort], $perPage: Int) {
     Page(page: 1, perPage: $perPage) {
@@ -51,6 +69,9 @@ const ANIME_QUERY = `
         episodes
         seasonYear
         genres
+        streamingEpisodes { title thumbnail url site }
+        externalLinks { url site type language }
+        siteUrl
       }
     }
   }
@@ -123,6 +144,76 @@ function cleanDescription(description: string | null) {
   return plainText || '暂无剧情简介。'
 }
 
+function safeExternalUrl(value: string | null | undefined) {
+  if (!value) return null
+
+  try {
+    const url = new URL(value)
+    return url.protocol === 'https:' ? url.href : null
+  } catch {
+    return null
+  }
+}
+
+function getYinghuaSearchUrl(query: string) {
+  const url = new URL(YINGHUA_SEARCH_URL)
+  url.searchParams.set('wd', query)
+  return url.href
+}
+
+function getYouTubeEmbedUrl(value: string | null | undefined) {
+  const safeUrl = safeExternalUrl(value)
+  if (!safeUrl) return null
+
+  const url = new URL(safeUrl)
+  const host = url.hostname.toLowerCase()
+  const youtubeHosts = new Set([
+    'youtube.com',
+    'www.youtube.com',
+    'm.youtube.com',
+    'youtu.be',
+    'youtube-nocookie.com',
+    'www.youtube-nocookie.com',
+  ])
+
+  if (!youtubeHosts.has(host)) return null
+
+  let videoId = ''
+  if (host === 'youtu.be') {
+    videoId = url.pathname.split('/').filter(Boolean)[0] ?? ''
+  } else if (url.pathname === '/watch') {
+    videoId = url.searchParams.get('v') ?? ''
+  } else {
+    videoId = url.pathname.match(/^\/(?:embed|shorts)\/([\w-]+)/)?.[1] ?? ''
+  }
+
+  if (!/^[\w-]{6,20}$/.test(videoId)) return null
+
+  const embedUrl = new URL(`https://www.youtube-nocookie.com/embed/${videoId}`)
+  embedUrl.searchParams.set('playsinline', '1')
+  embedUrl.searchParams.set('rel', '0')
+  embedUrl.searchParams.set('origin', window.location.origin)
+  return embedUrl.href
+}
+
+function getWatchEpisodes(anime: Anime) {
+  return (anime.streamingEpisodes ?? []).filter((episode) => {
+    const title = episode.title ?? ''
+    return safeExternalUrl(episode.url) && !/\b(trailer|teaser|preview|promotional video|pv)\b/i.test(title)
+  })
+}
+
+function getStreamingLinks(anime: Anime) {
+  const uniqueLinks = new Map<string, AnimeExternalLink>()
+
+  for (const link of anime.externalLinks ?? []) {
+    const url = link.type === 'STREAMING' ? safeExternalUrl(link.url) : null
+    if (url && !uniqueLinks.has(url)) uniqueLinks.set(url, link)
+  }
+
+  return [...uniqueLinks.entries()].map(([url, link]) => ({ ...link, url }))
+}
+
 function AnimeSkeleton() {
   return (
     <article className="anime-card skeleton-card" aria-hidden="true">
@@ -144,7 +235,13 @@ export default function App() {
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState('')
   const [retryCount, setRetryCount] = useState(0)
+  const [selectedAnime, setSelectedAnime] = useState<Anime | null>(null)
+  const [selectedEpisode, setSelectedEpisode] = useState<StreamingEpisode | null>(null)
+  const [watchSource, setWatchSource] = useState<'yinghua' | 'official'>('yinghua')
+  const [sourceDraft, setSourceDraft] = useState('')
+  const [sourceQuery, setSourceQuery] = useState('')
   const searchRef = useRef<HTMLInputElement>(null)
+  const lastFocusedAnimeRef = useRef<HTMLButtonElement | null>(null)
 
   useEffect(() => {
     const controller = new AbortController()
@@ -214,6 +311,26 @@ export default function App() {
     return () => document.removeEventListener('keydown', focusSearch)
   }, [])
 
+  useEffect(() => {
+    if (!selectedAnime) return
+
+    const previousOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setSelectedAnime(null)
+        setSelectedEpisode(null)
+        requestAnimationFrame(() => lastFocusedAnimeRef.current?.focus())
+      }
+    }
+
+    document.addEventListener('keydown', closeOnEscape)
+    return () => {
+      document.removeEventListener('keydown', closeOnEscape)
+      document.body.style.overflow = previousOverflow
+    }
+  }, [selectedAnime])
+
   const handleSearch = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     const nextQuery = draftQuery.trim()
@@ -230,6 +347,22 @@ export default function App() {
     setDraftQuery('')
     setSubmittedQuery('')
     searchRef.current?.focus()
+  }
+
+  const openWatchPage = (item: Anime, button: HTMLButtonElement) => {
+    lastFocusedAnimeRef.current = button
+    const title = getChineseTitle(item)
+    setSelectedAnime(item)
+    setSelectedEpisode(getWatchEpisodes(item)[0] ?? null)
+    setWatchSource('yinghua')
+    setSourceDraft(title)
+    setSourceQuery(title)
+  }
+
+  const closeWatchPage = () => {
+    setSelectedAnime(null)
+    setSelectedEpisode(null)
+    requestAnimationFrame(() => lastFocusedAnimeRef.current?.focus())
   }
 
   const isSearching = Boolean(submittedQuery)
@@ -311,7 +444,7 @@ export default function App() {
               <span aria-hidden="true">·</span>
               <span>一次显示 10 部</span>
               <span aria-hidden="true">·</span>
-              <span>不提供盗版播放源</span>
+              <span>支持第三方播放来源</span>
             </div>
           </div>
         </section>
@@ -353,6 +486,11 @@ export default function App() {
               <span className="message-symbol" aria-hidden="true">⌕</span>
               <h3>没有找到这部动漫</h3>
               <p>可以尝试简称、原名或英文名。</p>
+              {submittedQuery ? (
+                <a href={getYinghuaSearchUrl(submittedQuery)} target="_blank" rel="noreferrer">
+                  在樱花动漫搜索此名称 ↗
+                </a>
+              ) : null}
               <button type="button" onClick={clearSearch}>
                 返回热门榜
               </button>
@@ -363,12 +501,16 @@ export default function App() {
                 const primaryTitle = getChineseTitle(item)
                 const secondaryTitle = getSecondaryTitle(item, primaryTitle)
                 const cover = item.coverImage.extraLarge ?? item.coverImage.large
+                const watchCount = getWatchEpisodes(item).length
 
                 return (
-                  <article
+                  <button
                     className="anime-card"
                     key={item.id}
                     style={{ '--anime-accent': item.coverImage.color ?? '#6ee7f7' } as CSSProperties}
+                    type="button"
+                    aria-label={`${primaryTitle}，打开在线播放详情`}
+                    onClick={(event) => openWatchPage(item, event.currentTarget)}
                   >
                     <div className="cover-wrap">
                       {cover ? (
@@ -410,13 +552,213 @@ export default function App() {
                         <span>{item.episodes ? `${item.episodes} 集` : '集数待定'}</span>
                         <span>{item.popularity ? `${compactNumber.format(item.popularity)} 人气` : '人气统计中'}</span>
                       </div>
+                      <span className="watch-card-action">
+                        <span>{watchCount ? `${watchCount} 个正版集数 · 搜索更多来源` : '搜索播放来源'}</span>
+                        <span aria-hidden="true">↗</span>
+                      </span>
                     </div>
-                  </article>
+                  </button>
                 )
               })}
             </div>
           )}
         </section>
+
+        {selectedAnime ? (() => {
+          const title = getChineseTitle(selectedAnime)
+          const episodes = getWatchEpisodes(selectedAnime)
+          const streamingLinks = getStreamingLinks(selectedAnime)
+          const activeEpisodeUrl = safeExternalUrl(selectedEpisode?.url)
+          const embedUrl = getYouTubeEmbedUrl(activeEpisodeUrl)
+
+          return (
+            <div className="watch-backdrop" onMouseDown={(event) => {
+              if (event.target === event.currentTarget) closeWatchPage()
+            }}>
+              <section className="watch-dialog" role="dialog" aria-modal="true" aria-labelledby="watch-title">
+                <div className="watch-header">
+                  <div>
+                    <p className="section-label">WATCH ANIME</p>
+                    <h2 id="watch-title">{title}</h2>
+                    <p className="watch-subtitle">
+                      {watchSource === 'yinghua'
+                        ? '在樱花动漫搜索作品，选择结果和剧集后播放'
+                        : 'AniList 标注的正版入口 · 可用地区和免费情况以平台说明为准'}
+                    </p>
+                  </div>
+                  <button className="watch-close" type="button" onClick={closeWatchPage} aria-label="关闭播放详情">
+                    ×
+                  </button>
+                </div>
+
+                <div className="watch-source-tabs" role="group" aria-label="选择播放来源">
+                  <button
+                    type="button"
+                    className={watchSource === 'yinghua' ? 'is-active' : ''}
+                    aria-pressed={watchSource === 'yinghua'}
+                    onClick={() => setWatchSource('yinghua')}
+                  >
+                    樱花动漫
+                  </button>
+                  <button
+                    type="button"
+                    className={watchSource === 'official' ? 'is-active' : ''}
+                    aria-pressed={watchSource === 'official'}
+                    onClick={() => setWatchSource('official')}
+                  >
+                    正版平台
+                  </button>
+                </div>
+
+                {watchSource === 'yinghua' ? (
+                  <div className="third-party-source">
+                    <form className="third-party-search" role="search" onSubmit={(event) => {
+                      event.preventDefault()
+                      const nextQuery = sourceDraft.trim()
+                      if (nextQuery) setSourceQuery(nextQuery)
+                    }}>
+                      <label htmlFor="third-party-query">搜索樱花动漫资源</label>
+                      <div>
+                        <input
+                          id="third-party-query"
+                          type="search"
+                          value={sourceDraft}
+                          onChange={(event) => setSourceDraft(event.target.value)}
+                          placeholder="输入作品名称"
+                        />
+                        <button type="submit">搜索</button>
+                      </div>
+                    </form>
+                    <div className="third-party-frame">
+                      <iframe
+                        key={sourceQuery}
+                        src={getYinghuaSearchUrl(sourceQuery)}
+                        title={`樱花动漫搜索：${sourceQuery}`}
+                        sandbox="allow-forms allow-same-origin allow-scripts allow-presentation"
+                        allow="autoplay; encrypted-media; fullscreen; picture-in-picture"
+                        referrerPolicy="no-referrer"
+                        allowFullScreen
+                      />
+                    </div>
+                    <p className="third-party-note">
+                      页面和播放内容由樱花动漫提供。若无法在上方操作，
+                      <a href={getYinghuaSearchUrl(sourceQuery)} target="_blank" rel="noreferrer">在来源网站打开 ↗</a>
+                    </p>
+                  </div>
+                ) : (
+                  <>
+
+                {episodes.length > 0 ? (
+                  <div className="watch-layout">
+                    <div className="watch-player-column">
+                      {selectedEpisode && embedUrl ? (
+                        <div className="watch-video-frame">
+                          <iframe
+                            src={embedUrl}
+                            title={`${title} · ${selectedEpisode.title ?? '正版在线播放'}`}
+                            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                            referrerPolicy="strict-origin-when-cross-origin"
+                            allowFullScreen
+                          />
+                        </div>
+                      ) : selectedEpisode && activeEpisodeUrl ? (
+                        <div className="external-player-state">
+                          <span className="external-play-icon" aria-hidden="true">▶</span>
+                          <h3>{selectedEpisode.title || '选择的剧集'}</h3>
+                          <p>此正版片源由 {selectedEpisode.site || '对应平台'} 播放。</p>
+                          <a href={activeEpisodeUrl} target="_blank" rel="noreferrer">
+                            在 {selectedEpisode.site || '官方平台'} 中播放 <span aria-hidden="true">↗</span>
+                          </a>
+                        </div>
+                      ) : (
+                        <div className="external-player-state">
+                          <h3>选择一集开始观看</h3>
+                          <p>播放由对应正版平台提供。</p>
+                        </div>
+                      )}
+
+                      <div className="watch-now-playing">
+                        <div>
+                          <p className="section-label">正在播放</p>
+                          <h3>{selectedEpisode?.title || '选择一集'}</h3>
+                        </div>
+                        <span>{selectedEpisode?.site || '在线播放'}</span>
+                      </div>
+                    </div>
+
+                    <aside className="episode-panel" aria-label="正版在线播放集">
+                      <h3>可播放剧集 <span>{episodes.length}</span></h3>
+                      <div className="episode-list">
+                        {episodes.map((episode, episodeIndex) => {
+                          const isSelected = episode === selectedEpisode
+
+                          return (
+                            <button
+                              className={`episode-option${isSelected ? ' is-selected' : ''}`}
+                              type="button"
+                              key={`${episode.site ?? 'source'}-${episode.url}`}
+                              aria-pressed={isSelected}
+                              onClick={() => setSelectedEpisode(episode)}
+                            >
+                              {episode.thumbnail && safeExternalUrl(episode.thumbnail) ? (
+                                <img src={safeExternalUrl(episode.thumbnail) ?? undefined} alt="" loading="lazy" />
+                              ) : (
+                                <span className="episode-number">{episodeIndex + 1}</span>
+                              )}
+                              <span className="episode-option-copy">
+                                <strong>{episode.title || `第 ${episodeIndex + 1} 集`}</strong>
+                                <span>{episode.site || '正版播放平台'}</span>
+                              </span>
+                              <span className="episode-play" aria-hidden="true">
+                                {isSelected ? '▶' : '›'}
+                              </span>
+                            </button>
+                          )
+                        })}
+                      </div>
+                    </aside>
+                  </div>
+                ) : (
+                  <div className="no-episode-state">
+                    <span aria-hidden="true">◷</span>
+                    <h3>暂未收录可直接播放的正版集数</h3>
+                    <p>可以从以下作品所属的正版流媒体平台查看播放情况。</p>
+                  </div>
+                )}
+
+                {streamingLinks.length > 0 ? (
+                  <div className="streaming-links">
+                    <h3>{episodes.length ? '更多正版平台' : '正版流媒体平台'}</h3>
+                    <div>
+                      {streamingLinks.map((link) => (
+                        <a key={link.url} href={link.url ?? undefined} target="_blank" rel="noreferrer">
+                          <span>{link.site || '打开流媒体平台'}</span>
+                          {link.language ? <small>{link.language}</small> : null}
+                          <span aria-hidden="true">↗</span>
+                        </a>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+                  </>
+                )}
+
+                <div className="watch-footer">
+                  <span>
+                    {watchSource === 'yinghua'
+                      ? '第三方来源：樱花动漫（资源由来源网站提供）'
+                      : '播放来源：AniList 标注的合法流媒体入口'}
+                  </span>
+                  {safeExternalUrl(selectedAnime.siteUrl) ? (
+                    <a href={safeExternalUrl(selectedAnime.siteUrl) ?? undefined} target="_blank" rel="noreferrer">
+                      动漫资料 <span aria-hidden="true">↗</span>
+                    </a>
+                  ) : null}
+                </div>
+              </section>
+            </div>
+          )
+        })() : null}
 
         <section className="site-note" aria-labelledby="site-note-title">
           <div>
@@ -424,7 +766,7 @@ export default function App() {
             <h2 id="site-note-title">找作品，不推站点。</h2>
           </div>
           <p>
-            网搜只展示动漫资料与热门趋势，不在首页推荐第三方网站，也不收录盗版播放、下载或绕过付费限制的入口。
+            网搜展示动漫资料与热门趋势。点击作品可搜索樱花动漫资源，也可查看 AniList 标注的正版平台。
           </p>
         </section>
       </main>
